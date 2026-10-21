@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+
+server-data/
+world/
+world-generated-backup/
+ts-state/
+backups/
+
+*.log
+*.tmp
+*.swp
+*~

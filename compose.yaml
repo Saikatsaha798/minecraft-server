@@ -1,0 +1,56 @@
+
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    container_name: minecraft-tailscale
+    hostname: minecraft-home
+    restart: unless-stopped
+    ports:
+      - "25565:25565"
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_AUTH_ONCE: "true"
+      TS_USERSPACE: "false"
+    volumes:
+      - ./ts-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+
+  minecraft:
+    image: itzg/minecraft-server:java25
+    container_name: minecraft-paper
+    restart: unless-stopped
+    depends_on:
+      - tailscale
+    network_mode: "service:tailscale"
+    environment:
+      EULA: "TRUE"
+      TYPE: "PAPER"
+      VERSION: "LATEST"
+      MEMORY: "4G"
+      ONLINE_MODE: "FALSE"
+      LEVEL: "world"
+      ENABLE_WHITELIST: "TRUE"
+      ENFORCE_WHITELIST: "TRUE"
+      OPS: "NotSaikat"
+      MAX_PLAYERS: "8"
+      VIEW_DISTANCE: "8"
+      SIMULATION_DISTANCE: "6"
+    volumes:
+      - ./server-data:/data 
+    init: true
+    stdin_open: true
+    tty: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID  
+    pids_limit: 512
+    mem_limit: 5g
+
