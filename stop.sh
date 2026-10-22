@@ -51,6 +51,6 @@ echo "======================================"
 echo " Server stopped and backup synced!"
 echo " Latest backup: $BACKUP_FILE"
 echo " Google Drive: $DRIVE_DIR"
-echo " Local backups retained: 5"
+echo " Local backups retained: 3"
 echo "======================================"
 
