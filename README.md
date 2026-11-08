@@ -1,14 +1,18 @@
 # Acacia Nagar Minecraft Server
 
-A self-hosted Minecraft Java Edition server running with Docker Compose, Paper, and Tailscale on Ubuntu under WSL2.
+A self-hosted Minecraft Java Edition server running on Ubuntu under WSL2, using Docker Compose, Paper, and Tailscale for private multiplayer access.
+
+The project includes automated world backups, Google Drive synchronization, and a startup restoration workflow to help preserve the Minecraft world across devices and environments.
 
 ## Requirements
 
 - Windows with WSL2 and Ubuntu
 - Docker Engine and Docker Compose
 - A Tailscale account
+- A Google account for Google Drive backups
+- `rclone` configured with a Google Drive remote
 - Minecraft Java Edition
-- A Minecraft world backup, if migrating an existing world
+- An existing Minecraft world backup (if migrating an existing world)
 
 ## Project Structure
 
@@ -19,14 +23,19 @@ acacia_nagar/
 ├── .env.example          # Safe environment template
 ├── .gitignore
 ├── README.md
-├── start.sh
-├── stop.sh
-├── build-whitelist.sh
-├── world/                # Original world during migration
+├── start.sh              # Checks cloud backup and starts services
+├── stop.sh               # Stops services and creates backups
+├── sync.sh               # Downloads and restores cloud backups
+├── build-whitelist.sh    # Generates whitelist.json
+├── world/                # Original Aternos world (migration source)
 ├── server-data/          # Active Minecraft server data
-├── ts-state/             # Tailscale state; never commit
-└── backups/              # World archives; never commit
+├── ts-state/             # Persistent Tailscale state
+└── backups/              # Local world archives
 ```
+
+**Important:** `world/`, `server-data/`, `ts-state/`, and `backups/` contain runtime data and should not be committed to Git.
+
+---
 
 ## 1. Initial Setup
 
@@ -39,27 +48,61 @@ cd ~/minecraft-servers/acacia_nagar
 Make the scripts executable:
 
 ```bash
-chmod +x start.sh stop.sh build-whitelist.sh
+chmod +x start.sh stop.sh sync.sh build-whitelist.sh
 ```
 
-Create `.env` from the example template if needed:
+Create the environment configuration:
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-Configure your own Tailscale authentication key and Minecraft whitelist. Never commit `.env` or share its contents.
+Configure the required environment variables, including your Tailscale authentication key.
+
+Never commit or share `.env`. Keep your Tailscale credentials and other secrets private.
+
+### Google Drive setup
+
+Install and configure `rclone` if you haven't already.
+
+The Google Drive remote used by this project is:
+
+```text
+gdrive:Minecraft/backups
+```
+
+Verify the connection:
+
+```bash
+rclone listremotes
+rclone lsd gdrive:Minecraft
+rclone lsd gdrive:Minecraft/backups
+```
+
+The `gdrive` remote must be configured and authenticated before using cloud synchronization or restoration.
+
+---
 
 ## 2. Start the Server
 
-Start Minecraft and Tailscale in the background:
+Start the server using:
 
 ```bash
 ./start.sh
 ```
 
-Alternatively, use Docker Compose directly:
+The startup script performs the following operations:
+
+1. Checks Google Drive for the latest timestamped world backup.
+2. Checks whether a local active world already exists.
+3. Restores the latest cloud backup only if the local world is missing.
+4. Starts Minecraft and Tailscale using Docker Compose.
+5. Displays the service status.
+
+**Important:** Normal startup does not overwrite an existing local world.
+
+Alternatively, start the services directly:
 
 ```bash
 sudo docker compose up -d
@@ -71,15 +114,17 @@ Check running containers:
 sudo docker compose ps
 ```
 
-View Minecraft logs:
+Follow Minecraft logs:
 
 ```bash
 sudo docker logs -f minecraft-paper
 ```
 
-Press `Ctrl+C` to stop following the logs. This does not stop the server.
+Press `Ctrl+C` to stop following the logs. This does not stop the Minecraft server.
 
-## 3. Stop the Server and Back Up the World
+---
+
+## 3. Stop the Server and Create Backups
 
 Run:
 
@@ -87,72 +132,180 @@ Run:
 ./stop.sh
 ```
 
-The script should:
+The stop script performs the following operations:
 
-1. Stop Minecraft gracefully.
-2. Stop Tailscale.
-3. Create a timestamped archive of `server-data/world`.
-4. Keep the five most recent `world-*.tar.gz` backups.
-5. Preserve other archives, including the original Aternos backup.
+1. Gracefully stops Minecraft.
+2. Stops the Tailscale container.
+3. Creates a timestamped archive of `server-data/world`.
+4. Keeps the latest **three rolling world backups** locally.
+5. Preserves other archives, including the original Aternos backup.
+6. Synchronizes the local backup directory with Google Drive.
 
-Backups are stored in:
+### Local backup location
 
 ```text
 backups/
 ```
 
-List them:
+Rolling backup filenames follow this format:
+
+```text
+world-YYYY-MM-DD_HH-MM-SS.tar.gz
+```
+
+List available backups:
 
 ```bash
 ls -lh backups/
 ```
 
-**Important:** Verify that the backup completed successfully before deleting or changing any world data.
+### Backup retention
 
-## 4. Back Up the Original Aternos World
+The project retains three timestamped rolling backups.
 
-To create a backup of the original world:
+For example:
+
+```text
+backups/
+├── acacia-nagar-backup.tar.gz
+├── world-2026-11-06_20-30-00.tar.gz
+├── world-2026-11-07_20-30-00.tar.gz
+└── world-2026-11-08_20-30-00.tar.gz
+```
+
+The original Aternos archive is not included in the rolling cleanup and is preserved separately.
+
+**Important:** Verify that a backup completed successfully before deleting or modifying any world data.
+
+---
+
+## 4. Google Drive Synchronization
+
+The project uses `rclone` to synchronize local backups with Google Drive.
+
+Remote directory:
+
+```text
+gdrive:Minecraft/backups
+```
+
+The stop script runs:
+
+```bash
+rclone sync backups/ gdrive:Minecraft/backups/ --progress
+```
+
+This makes the Google Drive directory mirror the local backup directory.
+
+**Warning:** `rclone sync` deletes remote files that are no longer present locally. The original Aternos backup remains synchronized as long as it is retained locally in `backups/`.
+
+### Manually synchronize backups
+
+```bash
+rclone sync backups/ gdrive:Minecraft/backups/ --progress
+```
+
+### Check Google Drive backups
+
+```bash
+rclone lsf gdrive:Minecraft/backups
+```
+
+### Restore after losing local world data
+
+The `sync.sh` script downloads the latest timestamped backup from Google Drive.
+
+Normal execution:
+
+```bash
+./sync.sh
+```
+
+If `server-data/world` already exists, the script leaves it unchanged.
+
+To deliberately replace the local world with the latest cloud backup:
+
+```bash
+./sync.sh --restore
+```
+
+The restoration workflow:
+
+1. Checks that Minecraft is not running.
+2. Finds the latest timestamped backup in Google Drive.
+3. Downloads the archive.
+4. Verifies the archive.
+5. Extracts the world into a temporary staging directory.
+6. Creates a safety archive of the existing world, if present.
+7. Replaces the active world with the downloaded version.
+8. Applies Minecraft file ownership.
+
+The expected active world directory is:
+
+```text
+server-data/world/
+```
+
+**Never run a manual restoration while Minecraft is running.**
+
+### Google Drive authentication
+
+If the Google Drive token expires or is revoked, reconnect the remote:
+
+```bash
+rclone config reconnect gdrive:
+```
+
+Then verify the connection:
+
+```bash
+rclone lsd gdrive:Minecraft/backups
+```
+
+If authorization fails under WSL2, ensure the OAuth browser callback can reach the Ubuntu environment running rclone.
+
+---
+
+## 5. Original Aternos World Backup
+
+The original Aternos world should be preserved separately from the rolling backups.
+
+To create the archive:
 
 ```bash
 tar -czf backups/acacia-nagar-backup.tar.gz world
 ```
 
-This archives the `world/` directory in the project root.
-
-List the archive contents:
+Inspect its contents:
 
 ```bash
 tar -tzf backups/acacia-nagar-backup.tar.gz | head -30
 ```
 
-## 5. Restore a World Backup
+The archive should contain a top-level `world/` directory.
 
-Stop Minecraft before restoring any world data:
-
-```bash
-sudo docker compose stop minecraft
-```
-
-Inspect the archive first:
-
-```bash
-tar -tzf backups/acacia-nagar-backup.tar.gz | head -30
-```
-
-If the archive contains a top-level `world/` directory, restore it into the active server-data directory:
+To restore it into the active server-data directory:
 
 ```bash
 mkdir -p server-data
 tar -xzf backups/acacia-nagar-backup.tar.gz -C server-data
 ```
 
-This extracts the archive to `server-data/world`.
+This extracts the world to:
 
-**Do not extract over an existing active world without preserving it first.** Move the existing directory to a separate backup name before restoring.
+```text
+server-data/world/
+```
+
+**Do not extract over an existing active world without preserving it first.**
+
+Keep the original archive until you have verified the migrated world, player inventories, advancements, statistics, Nether, and End dimensions.
+
+---
 
 ## 6. World Migration
 
-The active world directory is:
+The active Minecraft world is located at:
 
 ```text
 server-data/world/
@@ -166,74 +319,93 @@ volumes:
   - ./server-data:/data
 ```
 
-Therefore, Minecraft loads `/data/world`, which maps to `server-data/world` on the host.
+Therefore:
 
-If the original world is in the project-root `world/` directory and you have verified that the active world is backed up, you can move it into place:
+| Host directory | Container directory |
+|---|---|
+| `server-data/` | `/data/` |
+| `server-data/world/` | `/data/world/` |
+
+If the original world is still in the project-root `world/` directory, migrate it only after preserving any existing active world.
 
 ```bash
 mv world server-data/world
 ```
 
-Do not run this command if `server-data/world` already exists. Preserve the existing directory first.
+Do not run this command if `server-data/world` already exists.
 
-Fix ownership and permissions if needed:
+### Fix permissions
+
+The following commands assume the Minecraft container runs using UID/GID 1000:
 
 ```bash
 sudo chown -R 1000:1000 server-data
 sudo chmod -R u+rwX server-data
 ```
 
-These commands assume the container uses UID/GID 1000 for its Minecraft files.
-
-Start the server again:
+Start the server:
 
 ```bash
 ./start.sh
 ```
 
-Check the logs for world-loading or migration errors:
+Check the logs for world-loading errors:
 
 ```bash
 sudo docker logs --tail 100 minecraft-paper
 ```
 
-### Version Compatibility
+---
 
-Avoid changing Minecraft versions unexpectedly. The configuration currently uses `VERSION: "LATEST"`, which can select a newer version during a rebuild.
+## 7. Minecraft Version Compatibility
+
+The current configuration uses:
+
+```yaml
+TYPE: "PAPER"
+VERSION: "LATEST"
+```
+
+`LATEST` can select a newer Minecraft version when the container is recreated.
+
+For a production world, pin a specific compatible Minecraft version rather than upgrading automatically.
 
 Before upgrading:
 
 1. Stop the server.
-2. Create a verified backup.
-3. Check Paper and plugin compatibility.
+2. Create and verify a world backup.
+3. Check Paper compatibility.
 4. Upgrade intentionally.
-5. Test the world before deleting old backups.
+5. Test the world and player data.
+6. Retain the previous backups until everything is verified.
 
-Downgrading a world after a version upgrade is not reliably safe.
+Downgrading an upgraded Minecraft world is not reliably safe.
 
-## 7. Tailscale and Multiplayer
+---
 
-The server shares the Tailscale container's network namespace.
+## 8. Tailscale and Multiplayer
 
-Check Tailscale connectivity:
+Minecraft shares the Tailscale container's network namespace.
+
+Check Tailscale logs:
 
 ```bash
 sudo docker logs --tail 100 minecraft-tailscale
 ```
 
-Friends with authorized Tailscale access can connect to the server using its Tailscale IP and port:
+Friends with authorized Tailscale access can connect using:
 
 ```text
 TAILSCALE_IP:25565
 ```
 
-For local play on the host PC, use:
+For local play on the host PC:
 
 ```text
 localhost:25565
 ```
 
-The Compose configuration must publish the Minecraft port on the `tailscale` service if local host access through the published port is required:
+The Tailscale service must publish the Minecraft port for local host access through Docker's published port:
 
 ```yaml
 ports:
@@ -242,104 +414,152 @@ ports:
 
 No router port forwarding is required for connections over Tailscale.
 
-### Security
+### Security considerations
 
-The current server uses `ONLINE_MODE: "FALSE"`. Minecraft usernames are not authenticated in offline mode, so a whitelist alone does not securely establish player identity.
+The server currently uses:
 
-Keep access restricted to trusted users. Do not grant operator privileges casually or expose this configuration publicly.
+```yaml
+ONLINE_MODE: "FALSE"
+```
 
-## 8. Whitelist and Operator Permissions
+Offline mode does not authenticate Minecraft usernames with Mojang/Microsoft.
 
-Generate the whitelist, if required by the project setup:
+Consequently:
+
+- A whitelist alone does not guarantee player identity.
+- Players may impersonate other usernames.
+- OP privileges should be restricted.
+- Access should remain limited to trusted Tailscale users.
+- Do not expose the offline-mode server publicly.
+
+---
+
+## 9. Whitelist and Operator Permissions
+
+Generate the whitelist using:
 
 ```bash
 ./build-whitelist.sh
 ```
 
-Operator permissions can be configured with the `OPS` environment variable in the Minecraft service:
+Operator permissions can be configured through the Minecraft service's environment:
 
 ```yaml
 OPS: "NotSaikat"
 ```
 
-Multiple usernames can be comma-separated:
+Multiple operators can be specified:
 
 ```yaml
 OPS: "NotSaikat,Madhu"
 ```
 
-Apply configuration changes:
+For an already-running server, use the Minecraft console or configured RCON interface for runtime changes.
+
+For example:
 
 ```bash
-sudo docker compose up -d
+sudo docker exec minecraft-paper rcon-cli whitelist reload
 ```
 
-For an already-running server, use the server console or configured RCON interface for runtime commands when appropriate.
+---
 
-## 9. Docker and WSL2
+## 10. Docker and WSL2 Management
 
-Check Docker:
+Check Docker status:
 
 ```bash
 sudo systemctl status docker
 ```
 
-Start Docker if necessary:
+Start and enable Docker:
 
 ```bash
 sudo systemctl enable --now docker
 ```
 
-Closing the Ubuntu terminal does not necessarily stop the server. However, if WSL2 shuts down, Docker and Minecraft inside WSL2 stop as well.
+Closing an Ubuntu terminal does not necessarily stop the Minecraft server.
 
-Reopen Ubuntu and run:
+However, shutting down WSL2 terminates the Ubuntu environment and its running containers.
+
+After reopening Ubuntu:
 
 ```bash
 cd ~/minecraft-servers/acacia_nagar
 ./start.sh
 ```
 
-## 10. Git Safety
+Check container status:
 
-Commit infrastructure and documentation, not live game data or credentials.
+```bash
+sudo docker compose ps
+```
 
-Recommended `.gitignore` entries:
+---
+
+## 11. Git and Repository Safety
+
+The Git repository should contain infrastructure, scripts, and documentation, not live Minecraft data or credentials.
+
+Recommended `.gitignore`:
 
 ```gitignore
+# Secrets
 .env
 .env.*
 !.env.example
 
+# Minecraft runtime data
 server-data/
 world/
 world-generated-backup/
+
+# Tailscale state
 ts-state/
+
+# Backups
 backups/
 
+# Temporary files
 *.log
 *.tmp
 *.swp
 *~
 ```
 
-Check before committing:
+Check repository status:
 
 ```bash
 git status --short
 ```
 
-Commit the project files:
+Stage project files:
 
 ```bash
 git add README.md compose.yaml .gitignore \
-  .env.example start.sh stop.sh build-whitelist.sh
-
-git commit -m "Document Minecraft server setup"
+  .env.example start.sh stop.sh sync.sh build-whitelist.sh
 ```
 
-Never commit `.env`, Tailscale state, world files, or backups. If a secret is accidentally committed or exposed, rotate it. Adding a file to `.gitignore` does not remove it from Git history.
+Commit:
 
-## Quick Reference
+```bash
+git commit -m "Document Minecraft server infrastructure and backup workflow"
+```
+
+Never commit:
+
+- `.env` or OAuth credentials
+- Tailscale state
+- Minecraft world data
+- Player data
+- Local backup archives
+- `rclone.conf`
+
+If a secret is accidentally committed or exposed, rotate it. Adding a file to `.gitignore` does not remove it from Git history.
+
+---
+
+## 12. Quick Reference
 
 | Task | Command |
 |---|---|
@@ -347,8 +567,26 @@ Never commit `.env`, Tailscale state, world files, or backups. If a secret is ac
 | Stop and back up | `./stop.sh` |
 | Check containers | `sudo docker compose ps` |
 | Follow Minecraft logs | `sudo docker logs -f minecraft-paper` |
-| List backups | `ls -lh backups/` |
-| Inspect backup contents | `tar -tzf backups/acacia-nagar-backup.tar.gz` |
+| Restore if local world is missing | `./sync.sh` |
+| Force cloud restoration | `./sync.sh --restore` |
+| List local backups | `ls -lh backups/` |
+| List cloud backups | `rclone lsf gdrive:Minecraft/backups` |
+| Manually sync backups | `rclone sync backups/ gdrive:Minecraft/backups/ --progress` |
 | Check Docker | `sudo systemctl status docker` |
+| Reload whitelist | `sudo docker exec minecraft-paper rcon-cli whitelist reload` |
 
-Keep at least one verified backup outside the WSL virtual disk. This protects the world if the WSL installation or Windows storage fails.
+---
+
+## Backup Strategy
+
+The project maintains three layers of protection:
+
+1. **Active world:** `server-data/world/`
+2. **Local rolling backups:** Three timestamped archives in `backups/`
+3. **Google Drive:** A synchronized copy of the local backup directory
+
+The original Aternos archive is preserved separately from rolling backup cleanup.
+
+For additional protection, periodically keep an independent copy of a verified backup outside the WSL2 virtual disk. This protects against Windows storage failures, WSL corruption, or accidental loss of the entire Ubuntu environment.
+
+**Acacia Nagar: Build, Explore, Preserve.**

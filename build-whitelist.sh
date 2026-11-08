@@ -4,28 +4,33 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Read WHITELIST from .env if it isn't already exported.
-if [[ -z "${WHITELIST:-}" ]]; then
-    if [[ ! -f .env ]]; then
-        echo "ERROR: .env not found" >&2
-        exit 1
+# Read a variable from .env if it isn't already exported.
+read_env() {
+    local var="$1"
+    local value="${!var:-}"
+
+    if [[ -z "$value" ]]; then
+        if [[ ! -f .env ]]; then
+            echo "ERROR: .env not found" >&2
+            exit 1
+        fi
+
+        value=$(sed -n "s/^${var}=//p" .env | tail -n 1)
+        value="${value%$'\r'}"
+        value="${value#\"}"
+        value="${value%\"}"
+        value="${value#\'}"
+        value="${value%\'}"
     fi
 
-    WHITELIST=$(sed -n 's/^WHITELIST=//p' .env | tail -n 1)
-    WHITELIST="${WHITELIST%$'\r'}"
-    WHITELIST="${WHITELIST#\"}"
-    WHITELIST="${WHITELIST%\"}"
-    WHITELIST="${WHITELIST#\'}"
-    WHITELIST="${WHITELIST%\'}"
-fi
+    echo "$value"
+}
 
-if [[ -z "$WHITELIST" ]]; then
-    echo "ERROR: WHITELIST is missing or empty" >&2
-    exit 1
-fi
+WHITELIST=$(read_env WHITELIST)
+OPS=$(read_env OPS)
 
 # Check required tools.
-for cmd in md5sum xxd; do
+for cmd in md5sum; do
     command -v "$cmd" >/dev/null || {
         echo "ERROR: Missing required command: $cmd" >&2
         exit 1
@@ -33,55 +38,96 @@ for cmd in md5sum xxd; do
 done
 
 mkdir -p server-data
-output="server-data/whitelist.json"
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
 
-printf '[\n' > "$tmp"
-first=true
+# Generate offline UUID for a username.
+offline_uuid() {
+    local name="$1"
+    local hex
 
-IFS=',' read -ra players <<< "$WHITELIST"
+    hex=$(printf 'OfflinePlayer:%s' "$name" | md5sum | cut -d' ' -f1)
 
-for raw_name in "${players[@]}"; do
-    name="${raw_name//[[:space:]]/}"
+    # Set UUID version 3.
+    hex="${hex:0:12}3${hex:13}"
 
-    [[ -z "$name" ]] && continue
+    # Set RFC 4122 variant bits.
+    local nibble=$((16#${hex:16:1}))
+    local variant=$(( (nibble & 3) | 8 ))
+    hex="${hex:0:16}$(printf '%x' "$variant")${hex:17}"
+
+    printf '%s-%s-%s-%s-%s' \
+        "${hex:0:8}" \
+        "${hex:8:4}" \
+        "${hex:12:4}" \
+        "${hex:16:4}" \
+        "${hex:20:12}"
+}
+
+# Validate username.
+validate_username() {
+    local name="$1"
 
     if [[ ${#name} -gt 16 || ! "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
         echo "ERROR: Invalid Minecraft username: $name" >&2
         exit 1
     fi
+}
 
-    # Offline UUID = MD5("OfflinePlayer:" + exact username)
-    hex=$(printf 'OfflinePlayer:%s' "$name" | md5sum | cut -d' ' -f1)
+# Generate JSON for whitelist or operators.
+generate_json() {
+    local input="$1"
+    local output="$2"
+    local type="$3"
 
-    # Set UUID version 3 in the third group.
-    hex="${hex:0:12}3${hex:13}"
-
-    # Set RFC 4122 variant bits in the fourth group.
-    nibble=$((16#${hex:16:1}))
-    variant=$(( (nibble & 3) | 8 ))
-    hex="${hex:0:16}$(printf '%x' "$variant")${hex:17}"
-
-    uuid="${hex:0:8}-${hex:8:4}-${hex:12:4}-${hex:16:4}-${hex:20:12}"
-
-    if [[ "$first" != true ]]; then
-        printf ',\n' >> "$tmp"
+    if [[ -z "$input" ]]; then
+        echo "ERROR: $type is missing or empty" >&2
+        exit 1
     fi
-    first=false
 
-    printf '  {"uuid":"%s","name":"%s"}' "$uuid" "$name" >> "$tmp"
-done
+    local tmp
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' RETURN
 
-printf '\n]\n' >> "$tmp"
+    printf '[\n' > "$tmp"
+    local first=true
 
-if [[ "$first" == true ]]; then
-    echo "ERROR: No usernames found" >&2
-    exit 1
-fi
+    IFS=',' read -ra players <<< "$input"
 
-mv "$tmp" "$output"
-trap - EXIT
+    for raw_name in "${players[@]}"; do
+        local name="${raw_name//[[:space:]]/}"
 
-echo "Whitelist generated: $output"
+        [[ -z "$name" ]] && continue
 
+        validate_username "$name"
+
+        local uuid
+        uuid=$(offline_uuid "$name")
+
+        if [[ "$first" != true ]]; then
+            printf ',\n' >> "$tmp"
+        fi
+        first=false
+
+        if [[ "$type" == "OPS" ]]; then
+            printf '  {"uuid":"%s","name":"%s","level":4,"bypassesPlayerLimit":false}' \
+                "$uuid" "$name" >> "$tmp"
+        else
+            printf '  {"uuid":"%s","name":"%s"}' \
+                "$uuid" "$name" >> "$tmp"
+        fi
+    done
+
+    if [[ "$first" == true ]]; then
+        echo "ERROR: No usernames found in $type" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+
+    printf '\n]\n' >> "$tmp"
+    mv "$tmp" "$output"
+
+    echo "$type generated: $output"
+}
+
+# Generate both files.
+generate_json "$WHITELIST" "server-data/whitelist.json" "WHITELIST"
+generate_json "$OPS" "server-data/ops.json" "OPS"
