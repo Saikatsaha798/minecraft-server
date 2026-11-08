@@ -27,8 +27,8 @@ sudo docker compose stop tailscale
 echo "[3/5] Creating world backup..."
 tar -czf "$BACKUP_FILE" -C server-data world
 
-# 4. Retain only the five newest automatic world backups.
-echo "[4/5] Keeping the five newest local backups..."
+# 4. Retain only the three newest automatic world backups.
+echo "[4/5] Keeping the three newest local backups..."
 
 mapfile -t OLD_BACKUPS < <(
     find "$BACKUP_DIR" -maxdepth 1 -type f \
